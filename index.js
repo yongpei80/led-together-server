@@ -1,4 +1,5 @@
 const WebSocket = require('ws');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 
@@ -64,10 +65,17 @@ function generateNickname(room) {
 }
 
 function generateRoomId() {
-  return Math.random()
-    .toString(36)
-    .substring(2, 6)
-    .toUpperCase();
+  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  let roomId;
+
+  do {
+    roomId = Array.from(
+      { length: 8 },
+      () => alphabet[crypto.randomInt(alphabet.length)],
+    ).join('');
+  } while (rooms[roomId]);
+
+  return roomId;
 }
 
 function generateParticipantId() {
@@ -113,27 +121,24 @@ function broadcastRoomState(roomId) {
   room.clients.forEach((client, index) => {
     client.deviceIndex = index;
 
-    send(client, {
+    const message = {
       type: 'room_updated',
-
       roomId,
-
-      participantCount:
-          room.clients.length,
-
+      participantCount: room.clients.length,
       deviceIndex: index,
+      totalDevices: room.clients.length,
+      participantId: client.participantId,
+      isHost: client === room.host,
+      participant: participants[index],
+    };
 
-      totalDevices:
-          room.clients.length,
+    // 순서 편집이 필요한 방장에게만 전체 목록을 보낸다.
+    // 일반 참여자에게 전체 목록을 반복 전송하는 O(N²) 트래픽을 방지한다.
+    if (client === room.host) {
+      message.participants = participants;
+    }
 
-      participantId:
-          client.participantId,
-
-      isHost:
-          client === room.host,
-
-      participants,
-    });
+    send(client, message);
   });
 }
 
@@ -345,6 +350,12 @@ wss.on('connection', (ws) => {
       const startTime =
           Date.now() + 4000;
 
+      // Display 렌더링에는 참여자 개인정보가 아닌 배치 순서별 너비만 필요하다.
+      // 전체 participant 객체 대신 숫자 배열을 보내 메시지 크기를 줄인다.
+      const deviceWidths = room.clients.map(
+        (client) => Number(client.screenWidth) || 0,
+      );
+
       room.clients.forEach(
         (client, index) => {
 
@@ -375,13 +386,13 @@ wss.on('connection', (ws) => {
             deviceIndex: index,
             deviceOrder: index + 1,
             totalDevices: room.clients.length,
-            participants: getParticipants(roomId),
+            deviceWidths,
           });
         },
       );
 
       console.log(
-        `전광판 시작: ${roomId}, text=${room.text}`,
+        `전광판 시작: ${roomId}, textLength=${room.text.length}, devices=${room.clients.length}`,
       );
     }
 
