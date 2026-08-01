@@ -159,6 +159,16 @@ wss.on('connection', (ws) => {
       message.toString(),
     );
 
+    // 클라이언트가 네트워크 왕복시간을 고려해 서버 시각을 보정할 수 있도록 응답한다.
+    if (data.type === 'time_sync') {
+      send(ws, {
+        type: 'time_sync_response',
+        requestId: data.requestId,
+        serverTime: Date.now(),
+      });
+      return;
+    }
+
     // 방 생성
     if (data.type === 'create_room') {
 
@@ -172,7 +182,7 @@ wss.on('connection', (ws) => {
         clients: [ws],
         host: ws,
         playing: false,
-        text: 'Success is the sum of small efforts, repeated day in and day out.',
+        text: '',
         color: 'white',
         speed: 120,
       };
@@ -321,13 +331,19 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      room.playing = true;
+      room.text = String(data.text || '')
+        .replace(/[\r\n]+/g, ' ')
+        .trim();
 
-      room.text =
-          String(data.text || '')
-            .replace(/[\r\n]+/g, ' ')
-            .trim() ||
-          'Success is the sum of small efforts, repeated day in and day out.';
+      if (!room.text) {
+        send(ws, {
+          type: 'error',
+          message: '전광판 문구를 입력해 주세요.',
+        });
+        return;
+      }
+
+      room.playing = true;
 
       room.color =
           data.color || 'white';
@@ -349,6 +365,8 @@ wss.on('connection', (ws) => {
 
       const startTime =
           Date.now() + 4000;
+
+      const broadcastServerNow = Date.now();
 
       // Display 렌더링에는 참여자 개인정보가 아닌 배치 순서별 너비만 필요하다.
       // 전체 participant 객체 대신 숫자 배열을 보내 메시지 크기를 줄인다.
@@ -374,7 +392,7 @@ wss.on('connection', (ws) => {
             gradient: room.gradient,
 
             startTime,
-            serverNow: Date.now(),
+            serverNow: broadcastServerNow,
 
             fontSize: data.fontSize,
             textWidth: data.textWidth,
