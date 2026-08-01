@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
+const PROTOCOL_VERSION = 2;
 
 const wss = new WebSocket.Server({
   port: PORT,
@@ -172,6 +173,14 @@ wss.on('connection', (ws) => {
     // 방 생성
     if (data.type === 'create_room') {
 
+      if (data.protocolVersion !== PROTOCOL_VERSION) {
+        send(ws, {
+          type: 'error',
+          message: '앱 버전이 맞지 않습니다. 모든 기기의 앱을 업데이트해 주세요.',
+        });
+        return;
+      }
+
       const roomId =
           generateRoomId();
 
@@ -198,6 +207,14 @@ wss.on('connection', (ws) => {
 
     // 방 참여
     if (data.type === 'join_room') {
+
+      if (data.protocolVersion !== PROTOCOL_VERSION) {
+        send(ws, {
+          type: 'error',
+          message: '앱 버전이 맞지 않습니다. 모든 기기의 앱을 업데이트해 주세요.',
+        });
+        return;
+      }
 
       const roomId = String(
         data.roomId || '',
@@ -380,6 +397,8 @@ wss.on('connection', (ws) => {
           send(client, {
             type:
                 'display_started',
+
+            protocolVersion: PROTOCOL_VERSION,
 
             roomId,
 
