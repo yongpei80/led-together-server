@@ -3,6 +3,7 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const PROTOCOL_VERSION = 2;
+const REPEAT_DISPLAY_LIMIT_MS = 60 * 60 * 1000;
 
 const wss = new WebSocket.Server({
   port: PORT,
@@ -141,6 +142,43 @@ function broadcastRoomState(roomId) {
 
     send(client, message);
   });
+}
+
+function clearDisplayExpiry(room) {
+  if (room?.displayExpiryTimer) {
+    clearTimeout(room.displayExpiryTimer);
+    room.displayExpiryTimer = null;
+  }
+
+  if (room) {
+    room.displayExpiresAt = null;
+  }
+}
+
+function closeRoomForDisplayExpiry(roomId) {
+  const room = rooms[roomId];
+
+  if (!room) return;
+
+  clearDisplayExpiry(room);
+  room.playing = false;
+
+  room.clients.forEach((client) => {
+    send(client, {
+      type: 'room_closed',
+      roomId,
+      reason: 'display_time_limit',
+      message: '반복 재생 1시간이 끝나 방을 종료했습니다.',
+      serverNow: Date.now(),
+    });
+
+    client.roomId = null;
+    client.deviceIndex = null;
+  });
+
+  delete rooms[roomId];
+
+  console.log(`반복 재생 1시간 만료 및 방 삭제: ${roomId}`);
 }
 
 wss.on('connection', (ws) => {
@@ -385,6 +423,17 @@ wss.on('connection', (ws) => {
 
       const broadcastServerNow = Date.now();
 
+      clearDisplayExpiry(room);
+
+      if (room.repeat) {
+        room.displayExpiresAt = startTime + REPEAT_DISPLAY_LIMIT_MS;
+        room.displayExpiryTimer = setTimeout(
+          () => closeRoomForDisplayExpiry(roomId),
+          room.displayExpiresAt - Date.now(),
+        );
+        room.displayExpiryTimer.unref?.();
+      }
+
       // Display 렌더링에는 참여자 개인정보가 아닌 배치 순서별 너비만 필요하다.
       // 전체 participant 객체 대신 숫자 배열을 보내 메시지 크기를 줄인다.
       const deviceWidths = room.clients.map(
@@ -412,6 +461,7 @@ wss.on('connection', (ws) => {
 
             startTime,
             serverNow: broadcastServerNow,
+            displayExpiresAt: room.displayExpiresAt,
 
             fontSize: data.fontSize,
             textWidth: data.textWidth,
@@ -445,6 +495,7 @@ wss.on('connection', (ws) => {
       }
 
       room.playing = false;
+      clearDisplayExpiry(room);
 
       room.clients.forEach((client) => {
         send(client, {
@@ -495,6 +546,8 @@ wss.on('connection', (ws) => {
 
       // 방장이 나가면 방 전체 종료
       if (isHost) {
+        clearDisplayExpiry(room);
+
         room.clients.forEach((client) => {
           send(client, {
             type: 'room_closed',
@@ -528,6 +581,7 @@ wss.on('connection', (ws) => {
       ws.deviceIndex = null;
 
       room.playing = false;
+      clearDisplayExpiry(room);
 
       if (wasPlaying) {
         room.clients.forEach((client) => {
@@ -591,6 +645,8 @@ wss.on('connection', (ws) => {
 
     // 방장 연결 종료
     if (wasHost) {
+      clearDisplayExpiry(room);
+
       room.clients.forEach((client) => {
         send(client, {
           type: 'room_closed',
@@ -611,6 +667,7 @@ wss.on('connection', (ws) => {
 
     // 일반 참여자 연결 종료
     room.playing = false;
+    clearDisplayExpiry(room);
 
     if (wasPlaying) {
       room.clients.forEach((client) => {
