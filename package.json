@@ -4,7 +4,9 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test:repeat-expiry": "node test/repeat-expiry.test.js",
+    "test:relay-room": "node test/relay-room.test.js"
   },
   "dependencies": {
     "ws": "^8.20.0"

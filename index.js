@@ -2,14 +2,23 @@ const WebSocket = require('ws');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const PROTOCOL_VERSION = 2;
-const REPEAT_DISPLAY_LIMIT_MS = 60 * 60 * 1000;
+const PROTOCOL_VERSION = 3;
+const DEFAULT_REPEAT_DISPLAY_LIMIT_MS = 60 * 60 * 1000;
+const configuredRepeatDisplayLimitMs = Number(
+  process.env.REPEAT_DISPLAY_LIMIT_MS,
+);
+const REPEAT_DISPLAY_LIMIT_MS =
+  Number.isFinite(configuredRepeatDisplayLimitMs) &&
+  configuredRepeatDisplayLimitMs >= 1000
+    ? configuredRepeatDisplayLimitMs
+    : DEFAULT_REPEAT_DISPLAY_LIMIT_MS;
 
 const wss = new WebSocket.Server({
   port: PORT,
 });
 
 const rooms = {};
+const relayRooms = {};
 
 const nicknamePool = [
   'moon',
@@ -144,6 +153,47 @@ function broadcastRoomState(roomId) {
   });
 }
 
+function closeRelayRoom(roomId, message) {
+  const room = relayRooms[roomId];
+  if (!room) return;
+
+  room.peers.forEach((peer) => {
+    send(peer, {
+      type: 'room_closed',
+      roomId,
+      message: message || '방장이 방을 종료했습니다.',
+    });
+    peer.relayRoomId = null;
+  });
+
+  room.host.relayHostRoomId = null;
+  delete relayRooms[roomId];
+}
+
+function joinRelayRoom(ws, room, roomId, data) {
+  if (room.peers.has(ws.participantId)) return true;
+
+  const suppliedToken = String(data.relayToken || '');
+  if (room.token && suppliedToken && suppliedToken !== room.token) {
+    send(ws, { type: 'error', message: '방 접속 정보가 올바르지 않습니다.' });
+    return true;
+  }
+
+  ws.relayRoomId = roomId;
+  ws.screenWidth = data.screenWidth || 0;
+  ws.screenHeight = data.screenHeight || 0;
+  room.peers.set(ws.participantId, ws);
+
+  send(room.host, {
+    type: 'relay_peer_joined',
+    roomId,
+    peerId: ws.participantId,
+    screenWidth: ws.screenWidth,
+    screenHeight: ws.screenHeight,
+  });
+  return true;
+}
+
 function clearDisplayExpiry(room) {
   if (room?.displayExpiryTimer) {
     clearTimeout(room.displayExpiryTimer);
@@ -197,6 +247,71 @@ wss.on('connection', (ws) => {
     const data = JSON.parse(
       message.toString(),
     );
+
+    if (data.type === 'register_relay_room') {
+      const roomId = String(data.roomId || '').trim().toUpperCase();
+
+      if (data.protocolVersion !== PROTOCOL_VERSION) {
+        send(ws, { type: 'error', message: '앱 버전이 맞지 않습니다.' });
+        return;
+      }
+
+      if (!/^[2-9A-HJ-NP-Z]{8}$/.test(roomId) || rooms[roomId] || relayRooms[roomId]) {
+        send(ws, { type: 'relay_registration_failed', reason: 'room_conflict' });
+        return;
+      }
+
+      relayRooms[roomId] = {
+        host: ws,
+        token: String(data.relayToken || ''),
+        peers: new Map(),
+      };
+      ws.relayHostRoomId = roomId;
+      send(ws, { type: 'relay_registered', roomId, serverNow: Date.now() });
+      return;
+    }
+
+    if (data.type === 'relay_send') {
+      const roomId = ws.relayHostRoomId;
+      const room = roomId && relayRooms[roomId];
+      if (!room || room.host !== ws || !data.payload) return;
+
+      if (data.peerId) {
+        const peer = room.peers.get(String(data.peerId));
+        if (peer) send(peer, data.payload);
+      } else {
+        room.peers.forEach((peer) => send(peer, data.payload));
+      }
+      return;
+    }
+
+    if (data.type === 'close_relay_room') {
+      const roomId = ws.relayHostRoomId;
+      if (roomId) closeRelayRoom(roomId);
+      return;
+    }
+
+    if (ws.relayRoomId) {
+      const room = relayRooms[ws.relayRoomId];
+      if (!room) {
+        ws.relayRoomId = null;
+        send(ws, { type: 'room_closed', message: '방이 종료되었습니다.' });
+        return;
+      }
+
+      send(room.host, {
+        type: 'relay_peer_message',
+        roomId: ws.relayRoomId,
+        peerId: ws.participantId,
+        payload: data,
+      });
+
+      if (data.type === 'leave_room' || data.type === 'leave_display') {
+        room.peers.delete(ws.participantId);
+        ws.relayRoomId = null;
+      }
+      return;
+    }
 
     // 클라이언트가 네트워크 왕복시간을 고려해 서버 시각을 보정할 수 있도록 응답한다.
     if (data.type === 'time_sync') {
@@ -259,6 +374,11 @@ wss.on('connection', (ws) => {
       )
         .trim()
         .toUpperCase();
+
+      if (relayRooms[roomId]) {
+        joinRelayRoom(ws, relayRooms[roomId], roomId, data);
+        return;
+      }
 
       if (!rooms[roomId]) {
 
@@ -618,6 +738,30 @@ wss.on('connection', (ws) => {
 
   // 네트워크 종료, 앱 강제 종료 등으로 연결이 끊어진 경우
   ws.on('close', () => {
+    if (ws.relayHostRoomId) {
+      closeRelayRoom(
+        ws.relayHostRoomId,
+        '방장 연결이 종료되어 방을 닫았습니다.',
+      );
+      return;
+    }
+
+    if (ws.relayRoomId) {
+      const relayRoomId = ws.relayRoomId;
+      const relayRoom = relayRooms[relayRoomId];
+      ws.relayRoomId = null;
+
+      if (relayRoom) {
+        relayRoom.peers.delete(ws.participantId);
+        send(relayRoom.host, {
+          type: 'relay_peer_left',
+          roomId: relayRoomId,
+          peerId: ws.participantId,
+        });
+      }
+      return;
+    }
+
     const roomId = ws.roomId;
 
     if (
